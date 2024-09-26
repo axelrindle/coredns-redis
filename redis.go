@@ -359,7 +359,10 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 		label = key
 	}
 
-	reply, err = conn.Do("HGET", redis.keyPrefix+z.Name+redis.keySuffix, label)
+	fqkn := redis.keyPrefix + z.Name + redis.keySuffix
+	log.Infof("HGET: %s %s", fqkn, label)
+
+	reply, err = conn.Do("HGET", fqkn, label)
 	if err != nil {
 		return nil
 	}
@@ -367,6 +370,9 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 	if err != nil {
 		return nil
 	}
+
+	log.Infof("Result: %s", val)
+
 	r := new(Record)
 	err = json.Unmarshal([]byte(val), r)
 	if err != nil {

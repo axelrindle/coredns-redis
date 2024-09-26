@@ -75,6 +75,8 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	record := redis.get(location, z)
 
+	log.Infof("Handling %s", qtype)
+
 	switch qtype {
 	case "A":
 		answers, extras = redis.A(qname, z, record)
