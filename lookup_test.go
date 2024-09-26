@@ -240,7 +240,7 @@ func TestAnswer(t *testing.T) {
 			if resp == nil {
 				resp = new(dns.Msg)
 			}
-			test.SortAndCheck(t, resp, tc)
+			test.SortAndCheck(resp, tc)
 		}
 	}
 }
