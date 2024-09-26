@@ -360,7 +360,7 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 	}
 
 	fqkn := redis.keyPrefix + z.Name + redis.keySuffix
-	log.Infof("HGET: %s %s", fqkn, label)
+	log.Debugf("HGET: %s %s", fqkn, label)
 
 	reply, err = conn.Do("HGET", fqkn, label)
 	if err != nil {
@@ -371,7 +371,7 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 		return nil
 	}
 
-	log.Infof("Result: %s", val)
+	log.Debugf("Result: %s", val)
 
 	r := new(Record)
 	err = json.Unmarshal([]byte(val), r)

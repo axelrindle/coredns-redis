@@ -1,7 +1,9 @@
 package redis
 
 import (
+	"encoding/json"
 	"fmt"
+
 	// "fmt"
 	"time"
 
@@ -18,20 +20,20 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	qname := state.Name()
 	qtype := state.Type()
 
-	log.Infof("Handling %s %s", qtype, qname)
+	log.Debugf("Handling %s %s", qtype, qname)
 
 	if time.Since(redis.LastZoneUpdate) > zoneUpdateTime {
 		redis.LoadZones()
 	}
 
 	zone := plugin.Zones(redis.Zones).Matches(qname)
-	log.Infof("Zone: %s", zone)
+	log.Debugf("Zone: %s", zone)
 	if zone == "" {
 		return plugin.NextOrFailure(qname, redis.Next, ctx, w, r)
 	}
 
 	z := redis.load(zone)
-	log.Infof("Zone Resolved: %s", z.Name)
+	log.Debugf("Zone Resolved: %s", z.Name)
 	if z == nil {
 		return redis.errorResponse(state, zone, dns.RcodeServerFailure, nil)
 	}
@@ -101,6 +103,11 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	default:
 		return redis.errorResponse(state, zone, dns.RcodeNotImplemented, nil)
 	}
+
+	prettyAnswers, _ := json.Marshal(answers)
+	prettyExtras, _ := json.Marshal(extras)
+	log.Debugf("Answers: %s", prettyAnswers)
+	log.Debugf("Extras: %s", prettyExtras)
 
 	m := new(dns.Msg)
 	m.SetReply(r)
