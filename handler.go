@@ -22,11 +22,11 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	log.Debugf("Handling %s %s", qtype, qname)
 
-	if time.Since(redis.LastZoneUpdate) > zoneUpdateTime {
+	if time.Since(redis.config.LastZoneUpdate) > zoneUpdateTime {
 		redis.LoadZones()
 	}
 
-	zone := plugin.Zones(redis.Zones).Matches(qname)
+	zone := plugin.Zones(redis.config.Zones).Matches(qname)
 	log.Debugf("Zone: %s", zone)
 	if zone == "" {
 		return plugin.NextOrFailure(qname, redis.Next, ctx, w, r)

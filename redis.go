@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -11,21 +12,26 @@ import (
 	"github.com/coredns/coredns/plugin"
 
 	redisCon "github.com/gomodule/redigo/redis"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 type Redis struct {
 	Next plugin.Handler `json:"-"`
 	Pool *redisCon.Pool `json:"-"`
 
-	redisAddress   string
-	redisPassword  string
-	connectTimeout int
-	readTimeout    int
-	keyPrefix      string
-	keySuffix      string
-	Ttl            uint32
-	Zones          []string
-	LastZoneUpdate time.Time
+	config *Config
+
+	// Kubernetes API interface
+	client     kubernetes.Interface
+	controller cache.Controller
+	indexer    cache.Indexer
+
+	// concurrency control to stop controller
+	stopLock sync.Mutex
+	shutdown bool
+	stopCh   chan struct{}
 }
 
 func (redis *Redis) LoadZones() {
@@ -42,7 +48,7 @@ func (redis *Redis) LoadZones() {
 	}
 	defer conn.Close()
 
-	reply, err = conn.Do("KEYS", redis.keyPrefix+"*"+redis.keySuffix)
+	reply, err = conn.Do("KEYS", redis.config.keyPrefix+"*"+redis.config.keySuffix)
 	if err != nil {
 		return
 	}
@@ -53,12 +59,12 @@ func (redis *Redis) LoadZones() {
 	}
 
 	for i := range zones {
-		zones[i] = strings.TrimPrefix(zones[i], redis.keyPrefix)
-		zones[i] = strings.TrimSuffix(zones[i], redis.keySuffix)
+		zones[i] = strings.TrimPrefix(zones[i], redis.config.keyPrefix)
+		zones[i] = strings.TrimSuffix(zones[i], redis.config.keySuffix)
 	}
 
-	redis.LastZoneUpdate = time.Now()
-	redis.Zones = zones
+	redis.config.LastZoneUpdate = time.Now()
+	redis.config.Zones = zones
 }
 
 func (redis *Redis) A(name string, z *Zone, record *Record) (answers, extras []dns.RR) {
@@ -170,13 +176,13 @@ func (redis *Redis) SOA(name string, z *Zone, record *Record) (answers, extras [
 	r := new(dns.SOA)
 	if record.SOA.Ns == "" {
 		r.Hdr = dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeSOA,
-			Class: dns.ClassINET, Ttl: redis.Ttl}
+			Class: dns.ClassINET, Ttl: redis.config.Ttl}
 		r.Ns = "ns1." + name
 		r.Mbox = "hostmaster." + name
 		r.Refresh = 86400
 		r.Retry = 7200
 		r.Expire = 3600
-		r.Minttl = redis.Ttl
+		r.Minttl = redis.config.Ttl
 	} else {
 		r.Hdr = dns.RR_Header{Name: dns.Fqdn(z.Name), Rrtype: dns.TypeSOA,
 			Class: dns.ClassINET, Ttl: redis.minTtl(record.SOA.Ttl)}
@@ -290,17 +296,17 @@ func (redis *Redis) serial() uint32 {
 }
 
 func (redis *Redis) minTtl(ttl uint32) uint32 {
-	if redis.Ttl == 0 && ttl == 0 {
+	if redis.config.Ttl == 0 && ttl == 0 {
 		return defaultTtl
 	}
-	if redis.Ttl == 0 {
+	if redis.config.Ttl == 0 {
 		return ttl
 	}
 	if ttl == 0 {
-		return redis.Ttl
+		return redis.config.Ttl
 	}
-	if redis.Ttl < ttl {
-		return redis.Ttl
+	if redis.config.Ttl < ttl {
+		return redis.config.Ttl
 	}
 	return ttl
 }
@@ -359,7 +365,7 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 		label = key
 	}
 
-	fqkn := redis.keyPrefix + z.Name + redis.keySuffix
+	fqkn := redis.config.keyPrefix + z.Name + redis.config.keySuffix
 	log.Debugf("HGET: %s %s", fqkn, label)
 
 	reply, err = conn.Do("HGET", fqkn, label)
@@ -420,17 +426,19 @@ func (redis *Redis) Connect() {
 	redis.Pool = &redisCon.Pool{
 		Dial: func() (redisCon.Conn, error) {
 			opts := []redisCon.DialOption{}
-			if redis.redisPassword != "" {
-				opts = append(opts, redisCon.DialPassword(redis.redisPassword))
+			if redis.config.redisPassword != "" {
+				opts = append(opts, redisCon.DialPassword(redis.config.redisPassword))
 			}
-			if redis.connectTimeout != 0 {
-				opts = append(opts, redisCon.DialConnectTimeout(time.Duration(redis.connectTimeout)*time.Millisecond))
+			if redis.config.connectTimeout != 0 {
+				opts = append(opts, redisCon.DialConnectTimeout(time.Duration(redis.config.connectTimeout)*time.Millisecond))
 			}
-			if redis.readTimeout != 0 {
-				opts = append(opts, redisCon.DialReadTimeout(time.Duration(redis.readTimeout)*time.Millisecond))
+			if redis.config.readTimeout != 0 {
+				opts = append(opts, redisCon.DialReadTimeout(time.Duration(redis.config.readTimeout)*time.Millisecond))
 			}
 
-			return redisCon.Dial("tcp", redis.redisAddress, opts...)
+            redisCon.
+
+			return redisCon.Dial("tcp", redis.config.redisAddress, opts...)
 		},
 	}
 }
@@ -445,7 +453,7 @@ func (redis *Redis) save(zone string, subdomain string, value string) error {
 	}
 	defer conn.Close()
 
-	_, err = conn.Do("HSET", redis.keyPrefix+zone+redis.keySuffix, subdomain, value)
+	_, err = conn.Do("HSET", redis.config.keyPrefix+zone+redis.config.keySuffix, subdomain, value)
 	return err
 }
 
@@ -463,7 +471,7 @@ func (redis *Redis) load(zone string) *Zone {
 	}
 	defer conn.Close()
 
-	reply, err = conn.Do("HKEYS", redis.keyPrefix+zone+redis.keySuffix)
+	reply, err = conn.Do("HKEYS", redis.config.keyPrefix+zone+redis.config.keySuffix)
 	if err != nil {
 		return nil
 	}
