@@ -18,17 +18,20 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	qname := state.Name()
 	qtype := state.Type()
 
+	log.Infof("Handling %s %s", qtype, qname)
+
 	if time.Since(redis.LastZoneUpdate) > zoneUpdateTime {
 		redis.LoadZones()
 	}
 
 	zone := plugin.Zones(redis.Zones).Matches(qname)
-	// fmt.Println("zone : ", zone)
+	log.Infof("Zone: %s", zone)
 	if zone == "" {
 		return plugin.NextOrFailure(qname, redis.Next, ctx, w, r)
 	}
 
 	z := redis.load(zone)
+	log.Infof("Zone Resolved: %s", z.Name)
 	if z == nil {
 		return redis.errorResponse(state, zone, dns.RcodeServerFailure, nil)
 	}
@@ -74,8 +77,6 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	extras := make([]dns.RR, 0, 10)
 
 	record := redis.get(location, z)
-
-	log.Infof("Handling %s", qtype)
 
 	switch qtype {
 	case "A":
