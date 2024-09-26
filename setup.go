@@ -1,12 +1,17 @@
 package redis
 
 import (
+	"encoding/json"
 	"strconv"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+
+	clog "github.com/coredns/coredns/plugin/pkg/log"
 )
+
+var log = clog.NewWithPlugin("redis")
 
 func init() {
 	caddy.RegisterPlugin("redis", caddy.Plugin{
@@ -30,82 +35,79 @@ func setup(c *caddy.Controller) error {
 }
 
 func redisParse(c *caddy.Controller) (*Redis, error) {
-	redis := Redis {
-		keyPrefix:"",
-		keySuffix:"",
-		Ttl:300,
+	redis := Redis{
+		keyPrefix: "",
+		keySuffix: "",
+		Ttl:       300,
 	}
 	var (
-		err            error
+		err error
 	)
 
 	for c.Next() {
-		if c.NextBlock() {
-			for {
-				switch c.Val() {
-				case "address":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.redisAddress = c.Val()
-				case "password":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.redisPassword = c.Val()
-				case "prefix":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.keyPrefix = c.Val()
-				case "suffix":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.keySuffix = c.Val()
-				case "connect_timeout":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.connectTimeout, err = strconv.Atoi(c.Val())
-					if err != nil {
-						redis.connectTimeout = 0
-					}
-				case "read_timeout":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					redis.readTimeout, err = strconv.Atoi(c.Val())
-					if err != nil {
-						redis.readTimeout = 0;
-					}
-				case "ttl":
-					if !c.NextArg() {
-						return &Redis{}, c.ArgErr()
-					}
-					var val int
-					val, err = strconv.Atoi(c.Val())
-					if err != nil {
-						val = defaultTtl
-					}
-					redis.Ttl = uint32(val)
-				default:
-					if c.Val() != "}" {
-						return &Redis{}, c.Errf("unknown property '%s'", c.Val())
-					}
+		for c.NextBlock() {
+			switch c.Val() {
+			case "address":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
 				}
-
-				if !c.Next() {
-					break
+				redis.redisAddress = c.Val()
+			case "password":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				redis.redisPassword = c.Val()
+			case "prefix":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				redis.keyPrefix = c.Val()
+			case "suffix":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				redis.keySuffix = c.Val()
+			case "connect_timeout":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				redis.connectTimeout, err = strconv.Atoi(c.Val())
+				if err != nil {
+					redis.connectTimeout = 0
+				}
+			case "read_timeout":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				redis.readTimeout, err = strconv.Atoi(c.Val())
+				if err != nil {
+					redis.readTimeout = 0
+				}
+			case "ttl":
+				if !c.NextArg() {
+					return &Redis{}, c.ArgErr()
+				}
+				var val int
+				val, err = strconv.Atoi(c.Val())
+				if err != nil {
+					val = defaultTtl
+				}
+				redis.Ttl = uint32(val)
+			default:
+				if c.Val() != "}" {
+					return &Redis{}, c.Errf("unknown property '%s'", c.Val())
 				}
 			}
-
 		}
-
-		redis.Connect()
-		redis.LoadZones()
-
-		return &redis, nil
 	}
-	return &Redis{}, nil
+
+	redis.Connect()
+	redis.LoadZones()
+
+	configString, err := json.Marshal(redis)
+	if err == nil {
+		log.Debug(string(configString))
+	}
+
+	return &redis, nil
 }
