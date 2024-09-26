@@ -106,7 +106,7 @@ func redisParse(c *caddy.Controller) (*Redis, error) {
 
 	configString, err := json.Marshal(redis)
 	if err == nil {
-		log.Debug(string(configString))
+		log.Info(string(configString))
 	}
 
 	return &redis, nil
