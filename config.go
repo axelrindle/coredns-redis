@@ -3,36 +3,38 @@ package redis
 import (
 	"encoding/json"
 	"strconv"
-	"time"
 
 	"github.com/coredns/caddy"
 )
 
 type Config struct {
-	redisAddress  string
-	redisPassword string
+	RedisAddress  string `json:"redis_address"`
+	RedisPassword string `json:"-"`
+	RedisDatabase uint64 `json:"redis_database"`
 
-	connectTimeout int
+	ConnectTimeout uint64 `json:"timeout_connect"`
+	ReadTimeout    uint64 `json:"timeout_read"`
 
-	readTimeout int
-	keyPrefix   string
-	keySuffix   string
+	KeyPrefix string `json:"prefix_key"`
+	KeySuffix string `json:"suffix_key"`
 
-	Ttl            uint32
-	Zones          []string
-	LastZoneUpdate time.Time
+	TTL uint64 `json:"ttl"`
 }
 
 func parseConfig(c *caddy.Controller) (*Config, error) {
 	config := &Config{
-		keyPrefix: "",
-		keySuffix: "",
-		Ttl:       300,
+		RedisDatabase: 0,
+
+		ConnectTimeout: 30,
+		ReadTimeout:    5,
+
+		KeyPrefix: "",
+		KeySuffix: "",
+
+		TTL: 300,
 	}
 
-	var (
-		err error
-	)
+	var err error
 
 	for c.Next() {
 		for c.NextBlock() {
@@ -41,48 +43,70 @@ func parseConfig(c *caddy.Controller) (*Config, error) {
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.redisAddress = c.Val()
+				config.RedisAddress = c.Val()
+
 			case "password":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.redisPassword = c.Val()
+				config.RedisPassword = c.Val()
+
+			case "database":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				val, err := strconv.ParseUint(c.Val(), 10, 32)
+				if err != nil {
+					log.Warningf("Error parsing config value database: %v", err)
+				} else {
+					config.RedisDatabase = val
+				}
+
 			case "prefix":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.keyPrefix = c.Val()
+				config.KeyPrefix = c.Val()
+
 			case "suffix":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.keySuffix = c.Val()
+				config.KeySuffix = c.Val()
+
 			case "connect_timeout":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.connectTimeout, err = strconv.Atoi(c.Val())
+				val, err := strconv.ParseUint(c.Val(), 10, 32)
 				if err != nil {
-					config.connectTimeout = 0
+					log.Warningf("Error parsing config value read_timeout: %v", err)
+				} else {
+					config.ConnectTimeout = val
 				}
+
 			case "read_timeout":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				config.readTimeout, err = strconv.Atoi(c.Val())
+				val, err := strconv.ParseUint(c.Val(), 10, 32)
 				if err != nil {
-					config.readTimeout = 0
+					log.Warningf("Error parsing config value read_timeout: %v", err)
+				} else {
+					config.ReadTimeout = val
 				}
+
 			case "ttl":
 				if !c.NextArg() {
 					return nil, c.ArgErr()
 				}
-				var val int
-				val, err = strconv.Atoi(c.Val())
+				val, err := strconv.ParseUint(c.Val(), 10, 32)
 				if err != nil {
-					val = defaultTtl
+					log.Warningf("Error parsing config value ttl: %v", err)
+				} else {
+					config.TTL = val
 				}
-				config.Ttl = uint32(val)
+
 			default:
 				if c.Val() != "}" {
 					return nil, c.Errf("unknown property '%s'", c.Val())

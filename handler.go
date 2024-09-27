@@ -4,17 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 
-	// "fmt"
-	"time"
-
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
 )
 
+type RedisHandler struct {
+	redis *Redis
+
+	next plugin.Handler
+}
+
 // ServeDNS implements the plugin.Handler interface.
-func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (h *RedisHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 
 	qname := state.Name()
@@ -22,24 +25,27 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	log.Debugf("Handling %s %s", qtype, qname)
 
-	if time.Since(redis.config.LastZoneUpdate) > zoneUpdateTime {
-		redis.LoadZones()
+	zones, err := h.redis.LoadZones()
+	if err != nil {
+		log.Errorf("Failed to load zone data: %v", err)
+		return plugin.NextOrFailure(qname, h.next, ctx, w, r)
 	}
 
-	zone := plugin.Zones(redis.config.Zones).Matches(qname)
+	zone := plugin.Zones(zones).Matches(qname)
 	log.Debugf("Zone: %s", zone)
 	if zone == "" {
-		return plugin.NextOrFailure(qname, redis.Next, ctx, w, r)
+		return plugin.NextOrFailure(qname, h.next, ctx, w, r)
 	}
 
-	z := redis.load(zone)
-	log.Debugf("Zone Resolved: %s", z.Name)
-	if z == nil {
-		return redis.errorResponse(state, zone, dns.RcodeServerFailure, nil)
+	z, err := h.redis.LoadZone(zone)
+	if err != nil {
+		return h.errorResponse(state, zone, dns.RcodeServerFailure, err)
+	} else {
+		log.Debugf("Zone Resolved: %s", z.Name)
 	}
 
 	if qtype == "AXFR" {
-		records := redis.AXFR(z)
+		records := h.redis.AXFR(z)
 
 		ch := make(chan *dns.Envelope)
 		tr := new(dns.Transfer)
@@ -70,38 +76,38 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		return dns.RcodeSuccess, nil
 	}
 
-	location := redis.findLocation(qname, z)
+	location := h.redis.Locate(qname, z)
 	if len(location) == 0 { // empty, no results
-		return redis.errorResponse(state, zone, dns.RcodeNameError, nil)
+		return h.errorResponse(state, zone, dns.RcodeNameError, nil)
 	}
 
 	answers := make([]dns.RR, 0, 10)
 	extras := make([]dns.RR, 0, 10)
 
-	record := redis.get(location, z)
+	record := h.redis.get(location, z)
 
 	switch qtype {
 	case "A":
-		answers, extras = redis.A(qname, z, record)
+		answers, extras = h.redis.A(qname, z, record)
 	case "AAAA":
-		answers, extras = redis.AAAA(qname, z, record)
+		answers, extras = h.redis.AAAA(qname, z, record)
 	case "CNAME":
-		answers, extras = redis.CNAME(qname, z, record)
+		answers, extras = h.redis.CNAME(qname, z, record)
 	case "TXT":
-		answers, extras = redis.TXT(qname, z, record)
+		answers, extras = h.redis.TXT(qname, z, record)
 	case "NS":
-		answers, extras = redis.NS(qname, z, record)
+		answers, extras = h.redis.NS(qname, z, record)
 	case "MX":
-		answers, extras = redis.MX(qname, z, record)
+		answers, extras = h.redis.MX(qname, z, record)
 	case "SRV":
-		answers, extras = redis.SRV(qname, z, record)
+		answers, extras = h.redis.SRV(qname, z, record)
 	case "SOA":
-		answers, extras = redis.SOA(qname, z, record)
+		answers, extras = h.redis.SOA(qname, z, record)
 	case "CAA":
-		answers, extras = redis.CAA(qname, z, record)
+		answers, extras = h.redis.CAA(qname, z, record)
 
 	default:
-		return redis.errorResponse(state, zone, dns.RcodeNotImplemented, nil)
+		return h.errorResponse(state, zone, dns.RcodeNotImplemented, nil)
 	}
 
 	prettyAnswers, _ := json.Marshal(answers)
@@ -123,9 +129,9 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 }
 
 // Name implements the Handler interface.
-func (redis *Redis) Name() string { return "redis" }
+func (redis *RedisHandler) Name() string { return "redis" }
 
-func (redis *Redis) errorResponse(state request.Request, zone string, rcode int, err error) (int, error) {
+func (redis *RedisHandler) errorResponse(state request.Request, zone string, rcode int, err error) (int, error) {
 	m := new(dns.Msg)
 	m.SetRcode(state.Req, rcode)
 	m.Authoritative, m.RecursionAvailable, m.Compress = true, false, true

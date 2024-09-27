@@ -4,67 +4,177 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 
-	"github.com/coredns/coredns/plugin"
-
-	redisCon "github.com/gomodule/redigo/redis"
-
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
+	driver "github.com/gomodule/redigo/redis"
 )
 
 type Redis struct {
-	Next plugin.Handler `json:"-"`
-	Pool *redisCon.Pool `json:"-"`
-
 	config *Config
 
+	pool             *driver.Pool
+	activeConnection driver.Conn
+
 	// Kubernetes API interface
-	client     kubernetes.Interface
-	controller cache.Controller
-	indexer    cache.Indexer
+	// client     kubernetes.Interface
+	// controller cache.Controller
+	// indexer    cache.Indexer
 
 	// concurrency control to stop controller
-	stopLock sync.Mutex
-	shutdown bool
-	stopCh   chan struct{}
+	// stopLock sync.Mutex
+	// shutdown bool
+	// stopCh   chan struct{}
 }
 
-func (redis *Redis) LoadZones() {
+func NewRedis(config *Config) *Redis {
+	instance := &Redis{
+		config: config,
+		pool: &driver.Pool{
+			Dial: func() (driver.Conn, error) {
+				opts := []driver.DialOption{
+					driver.DialDatabase(int(config.RedisDatabase)),
+				}
+
+				if config.RedisPassword != "" {
+					opts = append(opts, driver.DialPassword(config.RedisPassword))
+				}
+				if config.ConnectTimeout != 0 {
+					opts = append(opts, driver.DialConnectTimeout(time.Duration(config.ConnectTimeout)*time.Millisecond))
+				}
+				if config.ReadTimeout != 0 {
+					opts = append(opts, driver.DialReadTimeout(time.Duration(config.ReadTimeout)*time.Millisecond))
+				}
+
+				return driver.Dial("tcp", config.RedisAddress, opts...)
+			},
+		},
+	}
+
+	instance.Connect()
+
+	return instance
+}
+
+func (redis *Redis) Connect() (driver.Conn, error) {
+	// validate active connection
+	if redis.activeConnection != nil {
+		_, err := redis.activeConnection.Do("PING")
+		if err != nil {
+			redis.activeConnection.Close()
+		} else {
+			return redis.activeConnection, nil
+		}
+	}
+
+	// active connection failed or there was none
+	// open a new connection
+	conn := redis.pool.Get()
+	if conn.Err() != nil {
+		log.Errorf("Failed connecting to redis: %v", conn.Err())
+		return nil, conn.Err()
+	}
+
+	redis.activeConnection = conn
+
+	return conn, nil
+}
+
+func (redis *Redis) LoadZones() ([]string, error) {
 	var (
 		reply interface{}
 		err   error
 		zones []string
 	)
 
-	conn := redis.Pool.Get()
-	if conn == nil {
-		fmt.Println("error connecting to redis")
-		return
-	}
-	defer conn.Close()
-
-	reply, err = conn.Do("KEYS", redis.config.keyPrefix+"*"+redis.config.keySuffix)
+	conn, err := redis.Connect()
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	zones, err = redisCon.Strings(reply, nil)
+	reply, err = conn.Do("KEYS", redis.config.KeyPrefix+"*"+redis.config.KeySuffix)
 	if err != nil {
-		return
+		return nil, err
+	}
+
+	zones, err = driver.Strings(reply, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	for i := range zones {
-		zones[i] = strings.TrimPrefix(zones[i], redis.config.keyPrefix)
-		zones[i] = strings.TrimSuffix(zones[i], redis.config.keySuffix)
+		zones[i] = strings.TrimPrefix(zones[i], redis.config.KeyPrefix)
+		zones[i] = strings.TrimSuffix(zones[i], redis.config.KeySuffix)
 	}
 
-	redis.config.LastZoneUpdate = time.Now()
-	redis.config.Zones = zones
+	return zones, nil
+}
+
+func (redis *Redis) LoadZone(zone string) (*Zone, error) {
+	var (
+		reply interface{}
+		err   error
+		vals  []string
+	)
+
+	conn, err := redis.Connect()
+	if err != nil {
+		return nil, err
+	}
+
+	reply, err = conn.Do("HKEYS", redis.config.KeyPrefix+zone+redis.config.KeySuffix)
+	if err != nil {
+		return nil, err
+	}
+
+	z := new(Zone)
+	z.Name = zone
+	vals, err = driver.Strings(reply, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	z.Locations = make(map[string]struct{})
+	for _, val := range vals {
+		z.Locations[val] = struct{}{}
+	}
+
+	return z, nil
+}
+
+func (redis *Redis) Locate(query string, z *Zone) string {
+	var (
+		ok                                 bool
+		closestEncloser, sourceOfSynthesis string
+	)
+
+	// request for zone records
+	if query == z.Name {
+		return query
+	}
+
+	query = strings.TrimSuffix(query, "."+z.Name)
+
+	if _, ok = z.Locations[query]; ok {
+		return query
+	}
+
+	closestEncloser, sourceOfSynthesis, ok = splitQuery(query)
+	for ok {
+		ceExists := keyMatches(closestEncloser, z) || keyExists(closestEncloser, z)
+		ssExists := keyExists(sourceOfSynthesis, z)
+		if ceExists {
+			if ssExists {
+				return sourceOfSynthesis
+			} else {
+				return ""
+			}
+		} else {
+			closestEncloser, sourceOfSynthesis, ok = splitQuery(closestEncloser)
+		}
+	}
+	return ""
 }
 
 func (redis *Redis) A(name string, z *Zone, record *Record) (answers, extras []dns.RR) {
@@ -81,7 +191,7 @@ func (redis *Redis) A(name string, z *Zone, record *Record) (answers, extras []d
 	return
 }
 
-func (redis Redis) AAAA(name string, z *Zone, record *Record) (answers, extras []dns.RR) {
+func (redis *Redis) AAAA(name string, z *Zone, record *Record) (answers, extras []dns.RR) {
 	for _, aaaa := range record.AAAA {
 		if aaaa.Ip == nil {
 			continue
@@ -176,13 +286,13 @@ func (redis *Redis) SOA(name string, z *Zone, record *Record) (answers, extras [
 	r := new(dns.SOA)
 	if record.SOA.Ns == "" {
 		r.Hdr = dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeSOA,
-			Class: dns.ClassINET, Ttl: redis.config.Ttl}
+			Class: dns.ClassINET, Ttl: uint32(redis.config.TTL)}
 		r.Ns = "ns1." + name
 		r.Mbox = "hostmaster." + name
 		r.Refresh = 86400
 		r.Retry = 7200
 		r.Expire = 3600
-		r.Minttl = redis.config.Ttl
+		r.Minttl = uint32(redis.config.TTL)
 	} else {
 		r.Hdr = dns.RR_Header{Name: dns.Fqdn(z.Name), Rrtype: dns.TypeSOA,
 			Class: dns.ClassINET, Ttl: redis.minTtl(record.SOA.Ttl)}
@@ -225,7 +335,7 @@ func (redis *Redis) AXFR(z *Zone) (records []dns.RR) {
 	// Allocate slices for rr Records
 	for key := range z.Locations {
 		if key == "@" {
-			location := redis.findLocation(z.Name, z)
+			location := redis.Locate(z.Name, z)
 			record := redis.get(location, z)
 			soa, _ = redis.SOA(z.Name, z, record)
 		} else {
@@ -233,7 +343,7 @@ func (redis *Redis) AXFR(z *Zone) (records []dns.RR) {
 			var as []dns.RR
 			var xs []dns.RR
 
-			location := redis.findLocation(fqdnKey, z)
+			location := redis.Locate(fqdnKey, z)
 			record := redis.get(location, z)
 
 			// Pull all zone records
@@ -277,7 +387,7 @@ func (redis *Redis) hosts(name string, z *Zone) []dns.RR {
 		record  *Record
 		answers []dns.RR
 	)
-	location := redis.findLocation(name, z)
+	location := redis.Locate(name, z)
 	if location == "" {
 		return nil
 	}
@@ -296,53 +406,19 @@ func (redis *Redis) serial() uint32 {
 }
 
 func (redis *Redis) minTtl(ttl uint32) uint32 {
-	if redis.config.Ttl == 0 && ttl == 0 {
+	if redis.config.TTL == 0 && ttl == 0 {
 		return defaultTtl
 	}
-	if redis.config.Ttl == 0 {
+	if redis.config.TTL == 0 {
 		return ttl
 	}
 	if ttl == 0 {
-		return redis.config.Ttl
+		return uint32(redis.config.TTL)
 	}
-	if redis.config.Ttl < ttl {
-		return redis.config.Ttl
+	if uint32(redis.config.TTL) < ttl {
+		return uint32(redis.config.TTL)
 	}
 	return ttl
-}
-
-func (redis *Redis) findLocation(query string, z *Zone) string {
-	var (
-		ok                                 bool
-		closestEncloser, sourceOfSynthesis string
-	)
-
-	// request for zone records
-	if query == z.Name {
-		return query
-	}
-
-	query = strings.TrimSuffix(query, "."+z.Name)
-
-	if _, ok = z.Locations[query]; ok {
-		return query
-	}
-
-	closestEncloser, sourceOfSynthesis, ok = splitQuery(query)
-	for ok {
-		ceExists := keyMatches(closestEncloser, z) || keyExists(closestEncloser, z)
-		ssExists := keyExists(sourceOfSynthesis, z)
-		if ceExists {
-			if ssExists {
-				return sourceOfSynthesis
-			} else {
-				return ""
-			}
-		} else {
-			closestEncloser, sourceOfSynthesis, ok = splitQuery(closestEncloser)
-		}
-	}
-	return ""
 }
 
 func (redis *Redis) get(key string, z *Zone) *Record {
@@ -351,7 +427,7 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 		reply interface{}
 		val   string
 	)
-	conn := redis.Pool.Get()
+	conn := redis.pool.Get()
 	if conn == nil {
 		fmt.Println("error connecting to redis")
 		return nil
@@ -365,14 +441,14 @@ func (redis *Redis) get(key string, z *Zone) *Record {
 		label = key
 	}
 
-	fqkn := redis.config.keyPrefix + z.Name + redis.config.keySuffix
+	fqkn := redis.config.KeyPrefix + z.Name + redis.config.KeySuffix
 	log.Debugf("HGET: %s %s", fqkn, label)
 
 	reply, err = conn.Do("HGET", fqkn, label)
 	if err != nil {
 		return nil
 	}
-	val, err = redisCon.String(reply, nil)
+	val, err = driver.String(reply, nil)
 	if err != nil {
 		return nil
 	}
@@ -420,73 +496,6 @@ func splitQuery(query string) (string, string, bool) {
 		sourceOfSynthesis = "*"
 	}
 	return closestEncloser, sourceOfSynthesis, true
-}
-
-func (redis *Redis) Connect() {
-	redis.Pool = &redisCon.Pool{
-		Dial: func() (redisCon.Conn, error) {
-			opts := []redisCon.DialOption{}
-			if redis.config.redisPassword != "" {
-				opts = append(opts, redisCon.DialPassword(redis.config.redisPassword))
-			}
-			if redis.config.connectTimeout != 0 {
-				opts = append(opts, redisCon.DialConnectTimeout(time.Duration(redis.config.connectTimeout)*time.Millisecond))
-			}
-			if redis.config.readTimeout != 0 {
-				opts = append(opts, redisCon.DialReadTimeout(time.Duration(redis.config.readTimeout)*time.Millisecond))
-			}
-
-            redisCon.
-
-			return redisCon.Dial("tcp", redis.config.redisAddress, opts...)
-		},
-	}
-}
-
-func (redis *Redis) save(zone string, subdomain string, value string) error {
-	var err error
-
-	conn := redis.Pool.Get()
-	if conn == nil {
-		fmt.Println("error connecting to redis")
-		return nil
-	}
-	defer conn.Close()
-
-	_, err = conn.Do("HSET", redis.config.keyPrefix+zone+redis.config.keySuffix, subdomain, value)
-	return err
-}
-
-func (redis *Redis) load(zone string) *Zone {
-	var (
-		reply interface{}
-		err   error
-		vals  []string
-	)
-
-	conn := redis.Pool.Get()
-	if conn == nil {
-		fmt.Println("error connecting to redis")
-		return nil
-	}
-	defer conn.Close()
-
-	reply, err = conn.Do("HKEYS", redis.config.keyPrefix+zone+redis.config.keySuffix)
-	if err != nil {
-		return nil
-	}
-	z := new(Zone)
-	z.Name = zone
-	vals, err = redisCon.Strings(reply, nil)
-	if err != nil {
-		return nil
-	}
-	z.Locations = make(map[string]struct{})
-	for _, val := range vals {
-		z.Locations[val] = struct{}{}
-	}
-
-	return z
 }
 
 func split255(s string) []string {
