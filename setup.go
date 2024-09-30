@@ -11,10 +11,7 @@ import (
 var log = clog.NewWithPlugin("redis")
 
 func init() {
-	caddy.RegisterPlugin("redis", caddy.Plugin{
-		ServerType: "dns",
-		Action:     setup,
-	})
+	plugin.Register("redis", setup)
 }
 
 func setup(caddy *caddy.Controller) error {
@@ -24,7 +21,10 @@ func setup(caddy *caddy.Controller) error {
 	}
 
 	redis := NewRedis(config)
-	redis.Connect()
+	_, err = redis.Connect()
+	if err != nil {
+		return plugin.Error("redis", err)
+	}
 
 	handler := &RedisHandler{
 		redis: redis,

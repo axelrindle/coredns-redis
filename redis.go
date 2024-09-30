@@ -16,16 +16,6 @@ type Redis struct {
 
 	pool             *driver.Pool
 	activeConnection driver.Conn
-
-	// Kubernetes API interface
-	// client     kubernetes.Interface
-	// controller cache.Controller
-	// indexer    cache.Indexer
-
-	// concurrency control to stop controller
-	// stopLock sync.Mutex
-	// shutdown bool
-	// stopCh   chan struct{}
 }
 
 func NewRedis(config *Config) *Redis {
